@@ -1,6 +1,7 @@
 <?php
 
 use App\Jobs\GenerateScreenJob;
+use App\Jobs\GeneratePlaylistItemJob;
 use App\Models\Device;
 use App\Models\User;
 use Illuminate\Http\Request;
@@ -42,28 +43,34 @@ Route::get('/display', function (Request $request) {
     ]);
 
     $refreshTimeOverride = null;
+    $nextPlaylistItem = $device->getNextPlaylistItem();
     // Skip if cloud proxy is enabled for device
-    if (! $device->proxy_cloud || $device->getNextPlaylistItem()) {
-        $playlistItem = $device->getNextPlaylistItem();
+    if (! $device->proxy_cloud || $nextPlaylistItem) {
+        if ($nextPlaylistItem) {
+            $refreshTimeOverride = $nextPlaylistItem->playlist()->first()->refresh_time;
 
-        if ($playlistItem) {
-            $refreshTimeOverride = $playlistItem->playlist()->first()->refresh_time;
-
-            $plugin = $playlistItem->plugin;
+            $plugin = $nextPlaylistItem->plugin;
 
             // Check and update stale data if needed
-            if ($plugin->isDataStale()) {
+            if ($plugin->isDataStale() || $nextPlaylistItem->last_displayed_at == null) {
                 $plugin->updateDataPayload();
+
+                if ($plugin->render_markup) {
+                    $markup = Blade::render($plugin->render_markup, ['data' => $plugin->data_payload]);
+                } elseif ($plugin->render_markup_view) {
+                    $markup = view($plugin->render_markup_view, ['data' => $plugin->data_payload])->render();
+                }
+
+                GeneratePlaylistItemJob::dispatchSync($nextPlaylistItem->id, $markup);
             }
 
-            $playlistItem->update(['last_displayed_at' => now()]);
-            if ($plugin->render_markup) {
-                $markup = Blade::render($plugin->render_markup, ['data' => $plugin->data_payload]);
-            } elseif ($plugin->render_markup_view) {
-                $markup = view($plugin->render_markup_view, ['data' => $plugin->data_payload])->render();
-            }
+            $nextPlaylistItem->refresh();
 
-            GenerateScreenJob::dispatchSync($device->id, $markup);
+            if ($nextPlaylistItem->current_image != null)
+            {
+                $nextPlaylistItem->update(['last_displayed_at' => now()]);
+                $device->update(['current_screen_image' => $nextPlaylistItem->current_image]);
+            }
         }
     }
 
